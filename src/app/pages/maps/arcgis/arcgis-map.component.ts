@@ -2,8 +2,8 @@ import { Component, OnInit, OnDestroy, ViewChild, ElementRef } from "@angular/co
 import { setDefaultOptions, loadModules } from 'esri-loader';
 import { Subscription } from "rxjs";
 import { ITestItem } from "../../../@core/database/firebase";
-import { FirebaseMockService } from "../../../@core/database/firebase-mock";
-// import { FirebaseService } from "../../../@core/database/firebase";
+//import { FirebaseMockService } from "../../../@core/database/firebase-mock";
+import { FirebaseService } from "../../../@core/database/firebase";
 
 @Component({
     selector: "app-esri-map",
@@ -13,7 +13,7 @@ import { FirebaseMockService } from "../../../@core/database/firebase-mock";
 export class ArcGISMapComponent implements OnInit, OnDestroy {
     // The <div> where we will place the map
     @ViewChild("mapViewNode", { static: true }) private mapViewEl: ElementRef;
-    view: __esri.MapView;
+
     timeoutHandler = null;
 
     _Map;
@@ -21,10 +21,17 @@ export class ArcGISMapComponent implements OnInit, OnDestroy {
     _FeatureLayer;
     _Graphic;
     _GraphicsLayer;
+    _Route;
+    _RouteParameters;
+    _FeatureSet;
 
     map: __esri.Map;
+    view: __esri.MapView;
     pointGraphic: __esri.Graphic;
     graphicsLayer: __esri.GraphicsLayer;
+    route: __esri.route;
+    routeParameter: __esri.RouteParameters;
+    featureSet: __esri.FeatureSet;
 
     pointCoords: number[] = [-118.73682450024377, 34.07817583063242];
     dir: number = 0;
@@ -36,8 +43,8 @@ export class ArcGISMapComponent implements OnInit, OnDestroy {
     isConnected: boolean = false;
 
     constructor(
-        // private fbs: FirebaseService
-        private fbs: FirebaseMockService
+        private fbs: FirebaseService
+        //private fbs: FirebaseMockService
     ) { }
 
     connectFirebase() {
@@ -76,12 +83,15 @@ export class ArcGISMapComponent implements OnInit, OnDestroy {
             setDefaultOptions({ css: true });
 
             // Load the modules for the ArcGIS API for JavaScript
-            const [Map, MapView, FeatureLayer, Graphic, GraphicsLayer] = await loadModules([
+            const [Map, MapView, FeatureLayer, Graphic, GraphicsLayer, route, RouteParameters, FeatureSet] = await loadModules([
                 "esri/Map",
                 "esri/views/MapView",
                 "esri/layers/FeatureLayer",
                 "esri/Graphic",
-                "esri/layers/GraphicsLayer"
+                "esri/layers/GraphicsLayer",
+                "esri/rest/route",
+                "esri/rest/support/RouteParameters",
+                "esri/rest/support/FeatureSet",
             ]);
 
             this._Map = Map;
@@ -89,6 +99,9 @@ export class ArcGISMapComponent implements OnInit, OnDestroy {
             this._FeatureLayer = FeatureLayer;
             this._Graphic = Graphic;
             this._GraphicsLayer = GraphicsLayer;
+            this._Route = route;
+            this._RouteParameters = RouteParameters;
+            this._FeatureSet = FeatureSet;
 
             // Configure the Map
             const mapProperties = {
@@ -117,6 +130,21 @@ export class ArcGISMapComponent implements OnInit, OnDestroy {
                 console.log("map moved: ", point.longitude, point.latitude);
             });
 
+            this.view.on('click', (event) => {
+                if (this.view.graphics.length === 0) {
+                    this.addGraphic("origin", event.mapPoint)
+                } else if (this.view.graphics.length === 1) {
+                    this.addGraphic("destination", event.mapPoint);
+
+                    this.getRoute(); // Call the route service
+
+                } else {
+                    this.view.graphics.removeAll();
+                    this.addGraphic("origin", event.mapPoint);
+                }
+
+            });
+
             await this.view.when(); // wait for map to load
             console.log("ArcGIS map loaded");
             return this.view;
@@ -124,6 +152,67 @@ export class ArcGISMapComponent implements OnInit, OnDestroy {
             console.error("EsriLoader: ", error);
             throw error;
         }
+    }
+
+    addGraphic(type, point) {
+        const graphic = new this._Graphic({
+            symbol: {
+                type: "simple-marker",
+                color: (type === "origin") ? "white" : "black",
+                size: "8px"
+            },
+            geometry: point
+        });
+        this.view.graphics.add(graphic);
+    }
+
+    getRoute() {
+        const routeParams = new this._RouteParameters({
+            stops: new this._FeatureSet({
+                features: this.view.graphics.toArray()
+            }),
+
+            returnDirections: true
+
+        });
+        const routeUrl = "https://route-api.arcgis.com/arcgis/rest/services/World/Route/NAServer/Route_World";
+
+        this._Route.solve(routeUrl, routeParams)
+            .then((data) => {
+                data.routeResults.forEach((result) => {
+                    result.route.symbol = {
+                        type: "simple-line",
+                        color: [5, 150, 255],
+                        width: 3
+                    };
+                    this.view.graphics.add(result.route);
+                });
+
+                // Display directions
+                if (data.routeResults.length > 0) {
+                    const directions = document.createElement("ol");
+                    //directions.classList = "esri-widget esri-widget--panel esri-directions__scroller";
+                    directions.style.marginTop = "0";
+                    directions.style.padding = "15px 15px 15px 30px";
+                    const features = data.routeResults[0].directions.features;
+
+                    // Show each direction
+                    features.forEach((result) => {
+                        const direction = document.createElement("li");
+                        direction.innerHTML = result.attributes.text + " (" + result.attributes.length.toFixed(2) + " miles)";
+                        directions.appendChild(direction);
+                    });
+
+                    this.view.ui.empty("top-right");
+                    this.view.ui.add(directions, "top-right");
+                }
+
+            })
+
+            .catch((error) => {
+                console.log(error);
+            })
+
     }
 
     addFeatureLayers() {
@@ -209,6 +298,8 @@ export class ArcGISMapComponent implements OnInit, OnDestroy {
                 this.pointCoords[0] -= 0.02;
                 break;
         }
+        //firebase 
+        this.fbs.db.object('stat').set(this.pointCoords);
 
         this.count += 1;
         if (this.count >= 10) {
